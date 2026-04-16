@@ -8,7 +8,7 @@ import os
 # --- 環境設定 ---
 WEBOTS_HOME = "/Applications/Webots.app"
 os.environ['WEBOTS_HOME'] = WEBOTS_HOME
-os.environ['WEBOTS_CONTROLLER_URL'] = 'UR5e'
+os.environ['WEBOTS_CONTROLLER_URL'] = 'UR3e'
 sys.path.append(os.path.join(WEBOTS_HOME, "Contents/lib/controller/python"))
 from controller import Robot
 
