@@ -13,6 +13,9 @@ WORKDIR /app
 # requirements.txt をコピー（更新版）
 COPY requirements.txt .
 
+# Cython をインストール（ur_ikfast のコンパイルに必須）
+RUN pip install --no-cache-dir Cython
+
 # Python パッケージをインストール
 RUN pip install --no-cache-dir -r requirements.txt
 
