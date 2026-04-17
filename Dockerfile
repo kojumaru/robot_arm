@@ -5,6 +5,9 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     git \
     libusb-1.0-0-dev \
+    liblapack-dev \
+    libblas-dev \
+    gfortran \
     && rm -rf /var/lib/apt/lists/*
 
 # 作業ディレクトリ設定
