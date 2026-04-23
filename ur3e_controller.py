@@ -1,5 +1,6 @@
 import sys
 import os
+import msvcrt
 import usb.core
 import usb.util
 import struct
@@ -158,13 +159,27 @@ def main():
     print("\nIK 制御開始（姿勢固定モード）")
     print("  SpaceMouse 並進: 手先を X/Y/Z 方向へ移動")
     print("  右ボタン      : ホームポジションへリセット")
+    print("  ↑ / ↓        : lookahead_time を増減 (0.03 〜 0.20s)")
     print("  Ctrl+C        : 終了\n")
 
+    lookahead = 0.03
     dx = dy = dz = 0.0
 
     try:
         while True:
             loop_start = time.time()
+
+            # --- キーボードで lookahead_time を調整 ---
+            if msvcrt.kbhit():
+                key = msvcrt.getch()
+                if key in (b'\xe0', b'\x00'):  # 拡張キープレフィックス
+                    key2 = msvcrt.getch()
+                    if key2 == b'H':  # ↑
+                        lookahead = min(0.20, round(lookahead + 0.01, 3))
+                        print(f"\n[Lookahead] {lookahead:.3f}s")
+                    elif key2 == b'P':  # ↓
+                        lookahead = max(0.03, round(lookahead - 0.01, 3))
+                        print(f"\n[Lookahead] {lookahead:.3f}s")
 
             # --- 右ボタンでホームリセット（押した瞬間のみ）---
             with state_lock:
@@ -222,7 +237,7 @@ def main():
                     # servoJ で滑らかにリアルタイム送信
                     rtde_c.servoJ(
                         ik_clipped.tolist(),
-                        0.5, 0.5, DT, 0.03, 600
+                        0.5, 0.5, DT, lookahead, 600
                     )
                     current_joints = list(ik_clipped)
                 else:
@@ -242,7 +257,7 @@ def main():
             joint_str = ",".join(f"{a:.2f}" for a in current_joints)
             sys.stdout.write(
                 f"\r[IK] X:{current_pos[0]:7.4f}  Y:{current_pos[1]:7.4f}  Z:{current_pos[2]:7.4f}"
-                f"  J:[{joint_str}]"
+                f"  J:[{joint_str}]  lookahead:{lookahead:.3f}s"
             )
             sys.stdout.flush()
 
