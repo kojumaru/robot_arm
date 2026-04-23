@@ -38,7 +38,8 @@ VENDOR_ID  = 0x256f
 PRODUCT_ID = 0xc635
 DEADZONE = 10
 MAX_VAL  = 350
-GAIN_IK  = 0.002  # 入力感度（大きくすると動きが速くなる）
+GAIN_IK  = 0.002  # 入力感度（大きくすると動きが速くなる）↑↓キーで実行中に変更可能
+MAX_JOINT_SPEED = 3.14  # rad/s（UR3e 関節速度上限）
 
 # --- UR3e / ur_ikfast 設定 ---
 ur3e_arm = ur_kinematics.URKinematics('ur3e')
@@ -156,30 +157,30 @@ def main():
     sm_thread = threading.Thread(target=run_spacemouse, daemon=True)
     sm_thread.start()
 
-    print("\nIK 制御開始（姿勢固定モード）")
+    print("\nIK 制御開始（姿勢固定モード・speedJ）")
     print("  SpaceMouse 並進: 手先を X/Y/Z 方向へ移動")
     print("  右ボタン      : ホームポジションへリセット")
-    print("  ↑ / ↓        : lookahead_time を増減 (0.03 〜 0.20s)")
+    print("  ↑ / ↓        : 加速度 (acceleration) を増減 (1.0 〜 40.0 rad/s²)")
     print("  Ctrl+C        : 終了\n")
 
-    lookahead = 0.03
+    acceleration = 30.0
     dx = dy = dz = 0.0
 
     try:
         while True:
             loop_start = time.time()
 
-            # --- キーボードで lookahead_time を調整 ---
+            # --- キーボードで acceleration を調整 ---
             if msvcrt.kbhit():
                 key = msvcrt.getch()
                 if key in (b'\xe0', b'\x00'):  # 拡張キープレフィックス
                     key2 = msvcrt.getch()
                     if key2 == b'H':  # ↑
-                        lookahead = min(0.20, round(lookahead + 0.01, 3))
-                        print(f"\n[Lookahead] {lookahead:.3f}s")
+                        acceleration = min(40.0, round(acceleration + 2.0, 1))
+                        print(f"\n[Acceleration] {acceleration:.1f} rad/s²")
                     elif key2 == b'P':  # ↓
-                        lookahead = max(0.03, round(lookahead - 0.01, 3))
-                        print(f"\n[Lookahead] {lookahead:.3f}s")
+                        acceleration = max(1.0, round(acceleration - 2.0, 1))
+                        print(f"\n[Acceleration] {acceleration:.1f} rad/s²")
 
             # --- 右ボタンでホームリセット（押した瞬間のみ）---
             with state_lock:
@@ -234,21 +235,22 @@ def main():
                     print(f" allclose={allclose_ok} jump={jump_ok}({max_joint_delta:.3f})", end="")
 
                 if allclose_ok and jump_ok:
-                    # servoJ で滑らかにリアルタイム送信
-                    rtde_c.servoJ(
-                        ik_clipped.tolist(),
-                        0.5, 0.5, DT, lookahead, 600
-                    )
+                    # IK差分を速度に変換して speedJ で送信
+                    qd = (ik_clipped - np.array(current_joints)) / DT
+                    qd = np.clip(qd, -MAX_JOINT_SPEED, MAX_JOINT_SPEED)
+                    rtde_c.speedJ(qd.tolist(), acceleration, DT)
                     current_joints = list(ik_clipped)
                 else:
-                    # 関節制限またはジャンプ → 位置を戻す
+                    # 関節制限またはジャンプ → 停止して位置を戻す
+                    rtde_c.speedJ([0.0] * 6, acceleration, DT)
                     current_pos[0] -= dx
                     current_pos[1] -= dy
                     current_pos[2] -= dz
             else:
                 if abs(dx) + abs(dy) + abs(dz) > 0:
                     print(f" IK=None", end="")
-                # IK 解なし → 位置を戻す
+                # IK 解なし → 停止して位置を戻す
+                rtde_c.speedJ([0.0] * 6, acceleration, DT)
                 current_pos[0] -= dx
                 current_pos[1] -= dy
                 current_pos[2] -= dz
@@ -257,7 +259,7 @@ def main():
             joint_str = ",".join(f"{a:.2f}" for a in current_joints)
             sys.stdout.write(
                 f"\r[IK] X:{current_pos[0]:7.4f}  Y:{current_pos[1]:7.4f}  Z:{current_pos[2]:7.4f}"
-                f"  J:[{joint_str}]  lookahead:{lookahead:.3f}s"
+                f"  J:[{joint_str}]  accel:{acceleration:.1f}rad/s²"
             )
             sys.stdout.flush()
 
@@ -270,7 +272,7 @@ def main():
     except KeyboardInterrupt:
         print("\n\n終了中...")
     finally:
-        rtde_c.servoStop()
+        rtde_c.speedStop()
         rtde_c.stopScript()
         print("RTDE 接続を切断しました。")
 
