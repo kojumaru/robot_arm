@@ -38,7 +38,7 @@ VENDOR_ID  = 0x256f
 PRODUCT_ID = 0xc635
 DEADZONE = 10
 MAX_VAL  = 350
-GAIN_IK  = 0.002  # 入力感度（大きくすると動きが速くなる）↑↓キーで実行中に変更可能
+GAIN_IK  = 0.01  # 入力感度（大きくすると動きが速くなる）
 MAX_JOINT_SPEED = 3.14  # rad/s（UR3e 関節速度上限）
 
 # --- UR3e / ur_ikfast 設定 ---
@@ -104,12 +104,12 @@ def run_spacemouse():
                         x = (parse_axis(data[1], data[2]) / MAX_VAL) * GAIN_IK
                         y = (parse_axis(data[3], data[4]) * -1 / MAX_VAL) * GAIN_IK
                         z = (parse_axis(data[5], data[6]) * -1 / MAX_VAL) * GAIN_IK
-                        if abs(x) + abs(y) + abs(z) > 0:
-                            print(f"\n[SM] x={x:.4f} y={y:.4f} z={z:.4f} raw={list(data[:7])}")
                         with state_lock:
                             current_state["x"] += x
                             current_state["y"] += y
                             current_state["z"] += z
+                        if abs(x) + abs(y) + abs(z) > 0:
+                            print(f"\n[SM] x={x:.4f} y={y:.4f} z={z:.4f} raw={list(data[:7])}")
                     elif report_id == 3:
                         with state_lock:
                             if data[1] & 0x01:
@@ -163,7 +163,7 @@ def main():
     print("  ↑ / ↓        : 加速度 (acceleration) を増減 (1.0 〜 40.0 rad/s²)")
     print("  Ctrl+C        : 終了\n")
 
-    acceleration = 30.0
+    acceleration = 10.0
     dx = dy = dz = 0.0
 
     try:
@@ -182,23 +182,23 @@ def main():
                         acceleration = max(1.0, round(acceleration - 2.0, 1))
                         print(f"\n[Acceleration] {acceleration:.1f} rad/s²")
 
+            # --- 実機の関節角を読み戻して速度計算のズレを排除 ---
+            actual_q = rtde_r.getActualQ()
+            if actual_q:
+                current_joints = list(actual_q)
+
             # --- 右ボタンでホームリセット（押した瞬間のみ）---
             with state_lock:
                 btn_right = current_state["buttons"][1]
                 current_state["buttons"][1] = 0
             if btn_right == 1:
-                rtde_c.servoStop()
+                rtde_c.speedStop()
                 rtde_c.moveJ(HOME_JOINTS, speed=1.5, acceleration=1.5)
-
-                current_joints    = list(HOME_JOINTS)
-                initial_matrix    = ur3e_arm.forward(current_joints, 'matrix')
-                current_pos       = initial_matrix[:3, 3].copy()
-                fixed_orientation = initial_matrix[:3, :3].copy()
-                dx = dy = dz = 0.0
+                fixed_orientation = ur3e_arm.forward(HOME_JOINTS, 'matrix')[:3, :3].copy()
                 print("\n[Home] ホームポジションへリセット")
 
             else:
-                # --- 通常の SpaceMouse 操作（読み取りとクリアをアトミックに）---
+                # --- SpaceMouse の差分を今フレームの目標位置に加算 ---
                 with state_lock:
                     dx = current_state["x"]
                     dy = current_state["y"]
@@ -228,32 +228,21 @@ def main():
 
                 # IK解のジャンプ検出（1ステップで0.3rad以上変化したら棄却）
                 max_joint_delta = np.max(np.abs(ik_clipped - np.array(current_joints)))
-
-                allclose_ok = np.allclose(ik_clipped, ik_results)
                 jump_ok = max_joint_delta < 0.3
-                if abs(dx) + abs(dy) + abs(dz) > 0:
-                    print(f" allclose={allclose_ok} jump={jump_ok}({max_joint_delta:.3f})", end="")
 
-                if allclose_ok and jump_ok:
-                    # IK差分を速度に変換して speedJ で送信
+                if jump_ok:
+                    # IK差分を速度に変換して speedJ で送信（クリップ後の値をそのまま使用）
                     qd = (ik_clipped - np.array(current_joints)) / DT
                     qd = np.clip(qd, -MAX_JOINT_SPEED, MAX_JOINT_SPEED)
                     rtde_c.speedJ(qd.tolist(), acceleration, DT)
-                    current_joints = list(ik_clipped)
                 else:
-                    # 関節制限またはジャンプ → 停止して位置を戻す
+                    # IK解が飛びすぎ → 停止（次フレームで実機位置に自動リセット）
                     rtde_c.speedJ([0.0] * 6, acceleration, DT)
-                    current_pos[0] -= dx
-                    current_pos[1] -= dy
-                    current_pos[2] -= dz
             else:
                 if abs(dx) + abs(dy) + abs(dz) > 0:
                     print(f" IK=None", end="")
-                # IK 解なし → 停止して位置を戻す
+                # IK 解なし → 停止（次フレームで実機位置に自動リセット）
                 rtde_c.speedJ([0.0] * 6, acceleration, DT)
-                current_pos[0] -= dx
-                current_pos[1] -= dy
-                current_pos[2] -= dz
 
             # ターミナル表示
             joint_str = ",".join(f"{a:.2f}" for a in current_joints)
