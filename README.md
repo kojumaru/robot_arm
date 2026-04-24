@@ -1,103 +1,189 @@
-# SpaceMouse UR3e Webots Controller
+# SpaceMouse UR3e Controller
 
-SpaceMouse Compactを使用して、Webots上のUR3eロボットアームを直感的に操作するための外部コントローラ（Extern Controller）です。
-Mac環境で実装しています。
+SpaceMouse Compact で UR3e をリアルタイム操作するコントローラです。Windows PC 上で Python をネイティブ実行します。
 
-## 1. セットアップ
+メインスクリプト: **`ur3e_controller.py`**
 
-### 依存ライブラリのインストール
+---
 
-USBデバイスに直接アクセスするために pyusb を使用します。
+## 1. 仕組み
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+### 全体像
+
+```
+SpaceMouse Compact (USB, VID:PID = 256f:c635)
+     │  pyusb + libusb-win32 で HID レポートを直接読む
+     │  (3Dconnexion 純正ドライバは libusb と競合するので停止)
+     ▼
+Windows ネイティブ Python (.venv_win, Python 3.11)
+     │  ur3e_controller.py
+     │    ├─ SpaceMouse スレッド: 並進入力 (X/Y/Z) を TCP 速度に変換
+     │    ├─ 関節ソフトリミット: 関節がリミット付近で自動減速
+     │    └─ speedL: TCP速度ベクトルを 125 Hz で送信 (IK 不要)
+     │
+     │  TCP: ROBOT_IP:29999 / 30001-30004 (RTDE)
+     ▼
+UR3e コントローラ (実機 or URSim)
 ```
 
-### Webots側の設定
+### 制御ループ
 
-1. Webotsを起動し、UR3eが含まれるワールドを開きます。
-2. シーンツリーから **UR3e** を選択します。
-3. **controller** フィールドを `<extern>` に書き換えます。
-4. シミュレーションを **再生（または一時停止）** 状態にし、外部からの接続待ち状態（Waiting for local or remote connection...）にします。
+1. **初期化** — `moveJ` でホームポジション `[0, -1.57, 1.57, -1.57, -1.57, 0]` へ移動
+2. **SpaceMouse スレッド** — USB エンドポイント `0x81` を 10 ms タイムアウトで読み続け、report ID=1 (並進) / ID=3 (ボタン) をパース。生値を `MAX_VAL` で正規化し `GAIN` を乗じて m/s 単位の TCP 速度として共有状態に書き込む
+3. **制御ループ (125 Hz)**
+   - 共有状態から `vx, vy, vz` を取得
+   - `MAX_TCP_SPEED` でクリップ
+   - `getActualQ()` で実際の関節角を取得し、リミット付近なら速度を 0 に向けてスケール
+   - `speedL([vx, vy, vz, 0, 0, 0], acceleration, DT)` で送信
+4. **右ボタン** — `speedStop` → `moveJ(HOME_JOINTS)` でリセット
 
-## 2. 実行方法
+### speedL について
 
-USBデバイス権限とWebotsの通信パスを維持するため、以下の環境変数を指定して sudo で実行します。
+SpaceMouse の入力は自然に Cartesian 速度 (X/Y/Z) なので、speedL に直接渡せます。IK 計算・関節角度の内部追跡が不要で、位置ドリフトや振動が発生しません。ロボット内部の Jacobian が関節速度への変換を担当します。
 
-### ur3e_ik.py の実行方法
+---
 
-逆運動学（IK）ソルバーを使用した位置制御。SpaceMouse の並進入力（X, Y, Z）によりエンドエフェクタの位置を直感的に操作でき、姿勢は自動的に保持されます。
+## 2. セットアップ
 
-```bash
-sudo WEBOTS_HOME=/Applications/Webots.app WEBOTS_CONTROLLER_URL=UR3e USER=yoshidakouji ./.venv/bin/python ur3e_ik.py
+### 2.1 前提
+
+- Windows 11
+- Docker Desktop (URSim を使う場合)
+- Python 3.11 (Python Launcher `py` で呼べる状態)
+- [Zadig](https://zadig.akeo.ie/) — SpaceMouse を libusb-win32 ドライバに差し替える
+
+### 2.2 SpaceMouse を libusb-win32 に差し替え (初回のみ)
+
+1. Zadig を管理者で起動 → `Options` → `List All Devices`
+2. `SpaceMouse Compact` (256f:c635) を選択
+3. ドライバを `libusb-win32` にして `Replace Driver`
+
+### 2.3 venv 作成とパッケージインストール
+
+```powershell
+cd C:\Users\kojum\robot_arm
+py -3.11 -m venv .venv_win
+.venv_win\Scripts\Activate.ps1
+
+pip install numpy pyusb ur_rtde scipy scipy-openblas32
 ```
 
-**特徴:**
+---
 
-- 逆運動学により、指定した空間座標から関節角を自動計算
-- SpaceMouse の並進のみを使用（回転は使用しない）
-- エンドエフェクタの姿勢を固定したまま位置のみ制御
+## 3. 実行手順 (毎回)
 
-### 環境変数の詳細
+### 3.1 SpaceMouse の 3Dconnexion ドライバを停止
 
-| 変数                    | 説明                                                                                          |
-| ----------------------- | --------------------------------------------------------------------------------------------- |
-| `WEBOTS_HOME`           | Webots本体のインストールパス                                                                  |
-| `WEBOTS_CONTROLLER_URL` | 接続先ロボットの name フィールドと一致させる必要があります（今回は `UR3e`）                   |
-| `USER`                  | sudo 実行時にWebotsの通信パイプ（`/tmp/webots/ユーザー名`）が root にズレるのを防ぐために必須 |
+pyusb (libusb-win32) と競合するので一時的に止めます。
 
-## 3. 操作マニュアル
-
-### 3D操作 (逆運動学による位置制御)
-
-SpaceMouse の並進入力（X, Y, Z）を使用して、エンドエフェクタの位置を直感的に操作します。姿勢（回転）は固定されたまま、位置のみが制御されます。
-
-**操作方法:**
-
-- **前後 (X軸)**: アームを前後に移動させます
-- **左右 (Y軸)**: アームを左右に移動させます
-- **上下 (Z軸)**: アームを上下に移動させます
-
-**重要:** ur3e_ik.py は逆運動学（IK）ソルバーを使用しており、指定した空間座標を達成するために各関節を自動的に計算します。そのため、物理的に到達不可能な位置が指定されると計算が失敗し、その移動は実行されません。
-
-### リセット機能
-
-**右ボタン (Button 1)**:
-
-- 押すと、アームをプリセットされた **HOME POSITION**（L字姿勢）へ強制的に復帰させます。
-- 全関節が初期値にリセットされます。
-
-### パラメータ調整
-
-**GAIN_IK** (ur3e_ik.py の28行目):
-
-- SpaceMouse の入力感度を制御します（デフォルト: 0.005）
-- 値を大きくすると、より少ないマウス動作で大きく移動します
-- 値を小さくすると、より細かい調整が可能になります
-
-**HOME_JOINTS** (ur3e_ik.py の40行目):
-
-- リセット時のホームポジション（単位: ラジアン）
-- 6要素の配列で各関節の角度を指定
-
-## 4. デバッグツール
-
-### usb_test.py
-
-SpaceMouse の USB 接続を確認するためのデバッグツール：
-
-```bash
-sudo WEBOTS_HOME=/Applications/Webots.app WEBOTS_CONTROLLER_URL=UR3e USER=yoshidakouji ./.venv/bin/python usb_test.py
+```powershell
+Stop-Process -Name "3DxService","3DxWinCore" -Force -ErrorAction SilentlyContinue
 ```
 
-このツールは SpaceMouse が正しく認識されているか、入力値が正常に読み取られているか確認する際に使用します。
+### 3.2 URSim を使う場合: コンテナを起動
+
+```powershell
+docker run -d --name ursim `
+  -p 6080:6080 -p 5900:5900 `
+  -p 29999:29999 -p 30001:30001 -p 30002:30002 -p 30003:30003 -p 30004:30004 `
+  universalrobots/ursim_e-series:latest
+```
+
+ブラウザで `http://localhost:6080/vnc.html` を開き Polyscope を起動:
+
+1. ロボットの電源を ON → 初期化
+2. 右上の **Remote Control** を ON にする
+
+### 3.3 コントローラを起動
+
+**URSim**
+
+```powershell
+.venv_win\Scripts\Activate.ps1
+python ur3e_controller.py sim
+```
+
+**実機 UR3e**
+
+```powershell
+.venv_win\Scripts\Activate.ps1
+python ur3e_controller.py real
+```
+
+> 実機の場合は Polyscope で Remote Control を ON にしてください。
+
+期待される表示:
+
+```
+--- REAL モードで起動します ---
+接続先ターゲット: 192.168.1.102
+接続中... (192.168.1.102)
+接続成功！
+ホームポジションへ移動中...
+ホームポジション到達
+SpaceMouse を検索中...
+SpaceMouse 検出: SpaceMouse Compact
+
+TCP速度制御開始（speedL モード）
+[TCP] X:-0.2976  Y:-0.1342  Z:-0.2515  v:[0.000,0.000,0.000]  accel:0.50  gain:0.100
+```
+
+---
+
+## 4. 操作
+
+| 入力 | 動作 |
+|---|---|
+| SpaceMouse 前後 | TCP を X 方向に並進 |
+| SpaceMouse 左右 | TCP を Y 方向に並進 |
+| SpaceMouse 上下 | TCP を Z 方向に並進 |
+| 右ボタン | ホームポジションへ `moveJ` でリセット |
+| ↑ キー | acceleration を +0.05 rad/s² (最大 5.0) |
+| ↓ キー | acceleration を -0.05 rad/s² (最小 0.05) |
+| → キー | gain を +0.01 (最大 0.50) |
+| ← キー | gain を -0.01 (最小 0.01) |
+| Ctrl+C | 終了 (`speedStop` + `stopScript`) |
+
+姿勢 (回転) は固定。関節がソフトリミット付近に達すると TCP 速度が自動的にスケールダウンします。
+
+### パラメータ (ur3e_controller.py 冒頭)
+
+| 変数 | 既定値 | 意味 |
+|---|---|---|
+| `GAIN` | `0.1` | SpaceMouse 生値 → TCP 速度 (m/s) の倍率。→←キーで実行中に変更可 (0.01〜0.50、ステップ 0.01) |
+| `MAX_TCP_SPEED` | `0.25` | TCP 速度の上限 (m/s) |
+| `acceleration` | `0.5` | speedL の加速度 (rad/s²)。↑↓キーで実行中に変更可 (0.05〜5.0、ステップ 0.05) |
+| `CONTROL_HZ` | `125` | 制御ループの周波数 (Hz) |
+| `DEADZONE` | `10` | SpaceMouse 生値のデッドゾーン |
+| `MAX_VAL` | `350` | SpaceMouse 生値の正規化最大値 |
+| `JOINT_LIMIT_MARGIN` | `0.1` | ソフトリミット手前の減速開始マージン (rad) |
+
+### 関節ソフトリミット
+
+| 関節 | 範囲 (rad) |
+|---|---|
+| joint 2 (elbow) | 0.7 〜 2.3 |
+| joint 4 (wrist 2) | -3.0 〜 6.28 |
+
+---
 
 ## 5. トラブルシューティング
 
-| エラー                                   | 対処方法                                                                                                    |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `ModuleNotFoundError`                    | `sys.path.append` が `from controller import Robot` より前に記述されているか確認してください                |
-| `Access denied (USB)`                    | SpaceMouseのデバイスファイルへのアクセスには `sudo` が必須です                                              |
-| `Cannot open directory /tmp/webots/root` | `USER=$(whoami)` 変数が正しく渡されているか、Webots本体が自分と同じユーザーで起動しているか確認してください |
+| 症状 | 原因 / 対処 |
+|---|---|
+| `インターフェース取得失敗` | 3Dconnexion ドライバが動いている。`Stop-Process -Name '3DxService','3DxWinCore' -Force` を実行 |
+| `SpaceMouse が見つかりません` | Zadig の差し替えが未完了、または USB 未接続 |
+| `No backend available` | pyusb が libusb を見つけられない。`pip install pyusb` し直すか Zadig やり直し |
+| `Failed to start control script` | Polyscope で Remote Control が OFF / ロボット未初期化 |
+| `Connection refused` (localhost) | URSim コンテナが起動していない。`docker ps` で確認 |
+| 動作がガクつく | `.venv_win` ではなく WSL/Docker から動かしていないか確認。Windows ネイティブ実行が前提 |
+
+---
+
+## 6. ファイル構成
+
+| パス | 役割 |
+|---|---|
+| `ur3e_controller.py` | メインスクリプト |
+| `debug_spacemouse.py` | SpaceMouse の USB 入力を生データで確認するデバッグ用ツール |
+| `.venv_win/` | Python 3.11 仮想環境 (コミット対象外) |
